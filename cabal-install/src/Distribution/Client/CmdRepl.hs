@@ -89,7 +89,7 @@ import Distribution.Utils.Generic
 import Distribution.Verbosity
          ( normal, lessVerbose )
 import Distribution.Simple.Utils
-         ( wrapText, die', debugNoWrap )
+         ( wrapText, die', debugNoWrap, withTempDirectory )
 import Language.Haskell.Extension
          ( Language(..) )
 
@@ -98,9 +98,13 @@ import Data.List
 import qualified Data.Map as Map
 import qualified Data.Set as Set
 import System.Directory
-         ( doesFileExist, getCurrentDirectory )
+         ( doesFileExist, getCurrentDirectory, listDirectory, makeAbsolute )
 import System.FilePath
          ( (</>) )
+import Debug.Trace
+import Distribution.Simple.Program.Run
+import Distribution.Simple.Program.Builtin
+import Distribution.Simple.Program.Db
 
 data EnvFlags = EnvFlags
   { envPackages :: [Dependency]
@@ -194,6 +198,7 @@ replAction flags@NixStyleFlags { extraFlags = (replOpts, envFlags), ..} targetSt
           ++ "use 'repl'."
 
     let projectRoot = distProjectRootDirectory $ distDirLayout ctx
+        distDir = distDirectory $ distDirLayout ctx
 
     baseCtx <- case targetCtx of
       ProjectContext -> return ctx
@@ -228,9 +233,9 @@ replAction flags@NixStyleFlags { extraFlags = (replOpts, envFlags), ..} targetSt
         -- Unfortunately, the best way to do this is to let the normal solver
         -- help us resolve the targets, but that isn't ideal for performance,
         -- especially in the no-project case.
-        withInstallPlan (lessVerbose verbosity) baseCtx $ \elaboratedPlan _ -> do
+        withInstallPlan (lessVerbose verbosity) baseCtx $ \elaboratedPlan elaboratedShared -> do
           -- targets should be non-empty map, but there's no NonEmptyMap yet.
-          targets <- validatedTargets elaboratedPlan targetSelectors
+          targets <- validatedTargets (pkgConfigCompiler elaboratedShared) elaboratedPlan targetSelectors
 
           let
             (unitId, _) = fromMaybe (error "panic: targets should be non-empty") $ safeHead $ Map.toList targets
@@ -249,12 +254,14 @@ replAction flags@NixStyleFlags { extraFlags = (replOpts, envFlags), ..} targetSt
     -- In addition, to avoid a *third* trip through the solver, we are
     -- replicating the second half of 'runProjectPreBuildPhase' by hand
     -- here.
-    (buildCtx, compiler, replOpts') <- withInstallPlan verbosity baseCtx' $
+    (buildCtx, compiler, replOpts', targets) <- withInstallPlan verbosity baseCtx' $
       \elaboratedPlan elaboratedShared' -> do
         let ProjectBaseContext{..} = baseCtx'
 
         -- Recalculate with updated project.
-        targets <- validatedTargets elaboratedPlan targetSelectors
+        targets <- validatedTargets (pkgConfigCompiler elaboratedShared') elaboratedPlan targetSelectors
+
+        traceShowM ("targets", targets)
 
         let
           elaboratedPlan' = pruneInstallPlanToTargets
@@ -285,21 +292,44 @@ replAction flags@NixStyleFlags { extraFlags = (replOpts, envFlags), ..} targetSt
             Just oci -> generateReplFlags includeTransitive elaboratedPlan' oci
             Nothing  -> []
 
-        return (buildCtx, compiler, replOpts & lReplOptionsFlags %~ (++ replFlags))
+        traceShowM ("**************", replFlags)
+        return (buildCtx, compiler, replOpts & lReplOptionsFlags %~ (++ replFlags), targets)
 
-    replOpts'' <- case targetCtx of
-      ProjectContext -> return replOpts'
-      _              -> usingGhciScript compiler projectRoot replOpts'
+    traceShowM ("replOpts **************", replOpts, targetCtx)
+    if (Set.size (distinctTargetComponents targets) > 1)
+    then withTempDirectory verbosity distDir "multi-out-" $ \dir' -> do
+      traceShowM ("^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^", dir', distDir)
+      dir <- makeAbsolute dir'
+      replOpts'' <- case targetCtx of
+        ProjectContext -> return $ replOpts' { replOptionsFlagOutput = Flag dir}
+        _              -> usingGhciScript compiler projectRoot replOpts'
 
-    let buildCtx' = buildCtx & lElaboratedShared . lPkgConfigReplOptions .~ replOpts''
-    printPlan verbosity baseCtx' buildCtx'
+      let buildCtx' = buildCtx & lElaboratedShared . lPkgConfigReplOptions .~ replOpts''
+      printPlan verbosity baseCtx' buildCtx'
+      traceShowM ("replOpts **************", replOpts'', targetCtx)
 
-    buildOutcomes <- runProjectBuildPhase verbosity baseCtx' buildCtx'
-    runProjectPostBuildPhase verbosity baseCtx' buildCtx' buildOutcomes
+      buildOutcomes <- runProjectBuildPhase verbosity baseCtx' buildCtx'
+      runProjectPostBuildPhase verbosity baseCtx' buildCtx' buildOutcomes
+      unit_files <- listDirectory dir
+      let all_unit_opts = [["-unit", "@" ++ dir </> unit] | unit <- unit_files]
+      (ghcProg, _) <- requireProgram verbosity ghcProgram (pkgConfigCompilerProgs (elaboratedShared buildCtx'))
+      runProgramInvocation verbosity $ programInvocation ghcProg $ concat $ ["--interactive"]:all_unit_opts
+      pure ()
+    else do
+      replOpts'' <- case targetCtx of
+        ProjectContext -> return replOpts'
+        _              -> usingGhciScript compiler projectRoot replOpts'
+
+      let buildCtx' = buildCtx & lElaboratedShared . lPkgConfigReplOptions .~ replOpts''
+      printPlan verbosity baseCtx' buildCtx'
+      traceShowM ("replOpts **************", replOpts'', targetCtx)
+
+      buildOutcomes <- runProjectBuildPhase verbosity baseCtx' buildCtx'
+      runProjectPostBuildPhase verbosity baseCtx' buildCtx' buildOutcomes
   where
     verbosity = fromFlagOrDefault normal (configVerbosity configFlags)
 
-    validatedTargets elaboratedPlan targetSelectors = do
+    validatedTargets compiler elaboratedPlan targetSelectors = do
       -- Interpret the targets on the command line as repl targets
       -- (as opposed to say build or haddock targets).
       targets <- either (reportTargetProblems verbosity) return
@@ -313,11 +343,15 @@ replAction flags@NixStyleFlags { extraFlags = (replOpts, envFlags), ..} targetSt
       -- Reject multiple targets, or at least targets in different
       -- components. It is ok to have two module/file targets in the
       -- same component, but not two that live in different components.
-      when (Set.size (distinctTargetComponents targets) > 1) $
+      when (Set.size (distinctTargetComponents targets) > 1 && compilerCompatVersion GHC compiler <= Just minMultipleHomeUnitsVersion) $
         reportTargetProblems verbosity
           [multipleTargetsProblem targets]
 
       return targets
+
+-- | First version of GHC which supports multile home packages
+minMultipleHomeUnitsVersion :: Version
+minMultipleHomeUnitsVersion = mkVersion [9, 4]
 
 data OriginalComponentInfo = OriginalComponentInfo
   { ociUnitId :: UnitId
@@ -377,6 +411,7 @@ usingGhciScript compiler projectRoot replOpts
       writeFile ghciScriptPath (":cd " ++ cwd)
       return $ replOpts & lReplOptionsFlags %~ (("-ghci-script" ++ ghciScriptPath) :)
   | otherwise = return replOpts
+
 
 -- | First version of GHC where GHCi supported the flag we need.
 -- https://downloads.haskell.org/~ghc/7.6.1/docs/html/users_guide/release-7-6-1.html

@@ -53,7 +53,7 @@ import           Distribution.Client.Types
                    hiding (BuildOutcomes, BuildOutcome,
                            BuildResult(..), BuildFailure(..))
 import           Distribution.Client.InstallPlan
-                   ( GenericInstallPlan, GenericPlanPackage, IsUnit )
+                   ( GenericInstallPlan, GenericPlanPackage, IsUnit, showInstallPlan )
 import qualified Distribution.Client.InstallPlan as InstallPlan
 import           Distribution.Client.DistDirLayout
 import           Distribution.Client.FileMonitor
@@ -105,6 +105,8 @@ import System.FilePath   (dropDrive, makeRelative, normalise, takeDirectory, (<.
 import System.IO         (IOMode (AppendMode), Handle, withFile)
 
 import Distribution.Compat.Directory (listDirectory)
+import Debug.Trace
+import GHC.Stack
 
 
 ------------------------------------------------------------------------------
@@ -392,7 +394,7 @@ packageFileMonitorKeyValues elab =
             elabBuildTargets   = [],
             elabTestTargets    = [],
             elabBenchTargets   = [],
-            elabReplTarget     = Nothing,
+            elabReplTarget     = [],
             elabHaddockTargets = [],
             elabBuildHaddocks  = False,
 
@@ -609,11 +611,14 @@ rebuildTargets verbosity
                           (BuildFailure Nothing . DependentFailed . packageId)
                           installPlan $ \pkg ->
         --TODO: review exception handling
-        handle (\(e :: BuildFailure) -> return (Left e)) $ fmap Right $
+        handle (\(e :: BuildFailure) -> return (Left e)) $ fmap Right $ do
 
         let uid = installedUnitId pkg
-            pkgBuildStatus = Map.findWithDefault (error "rebuildTargets") uid pkgsBuildStatus in
+            pkgBuildStatus = Map.findWithDefault (error "rebuildTargets") uid pkgsBuildStatus
 
+        traceShowM ("### build plan")
+        traceM $ showInstallPlan installPlan
+        traceShowM ("### pkg", pkg)
         rebuildTarget
           verbosity
           distDirLayout
@@ -654,7 +659,8 @@ createPackageDBIfMissing _ _ _ _ = return ()
 
 -- | Given all the context and resources, (re)build an individual package.
 --
-rebuildTarget :: Verbosity
+rebuildTarget :: HasCallStack
+              => Verbosity
               -> DistDirLayout
               -> StoreDirLayout
               -> BuildTimeSettings
@@ -1204,7 +1210,7 @@ hasValidHaddockTargets ElaboratedConfiguredPackage{..}
   where
     components :: [ComponentTarget]
     components = elabBuildTargets ++ elabTestTargets ++ elabBenchTargets
-              ++ maybeToList elabReplTarget ++ elabHaddockTargets
+              ++ elabReplTarget ++ elabHaddockTargets
 
     componentHasHaddocks :: ComponentTarget -> Bool
     componentHasHaddocks (ComponentTarget name _) =
@@ -1219,7 +1225,8 @@ hasValidHaddockTargets ElaboratedConfiguredPackage{..}
         hasHaddocks = not (null (elabPkgDescription ^. componentModules name))
 
 
-buildInplaceUnpackedPackage :: Verbosity
+buildInplaceUnpackedPackage :: HasCallStack
+                            => Verbosity
                             -> DistDirLayout
                             -> BuildTimeSettings -> Lock -> Lock
                             -> ElaboratedSharedConfig
@@ -1338,9 +1345,10 @@ buildInplaceUnpackedPackage verbosity
 
         -- Repl phase
         --
-        whenRepl $
+        whenRepl $ do
+          traceM ("repl: **** " ++ show (elabReplTarget pkg, replFlags undefined, replArgs undefined))
           annotateFailureNoLog ReplFailed $
-          setupInteractive replCommand replFlags replArgs
+            setupInteractive replCommand replFlags replArgs
 
         -- Haddock phase
         whenHaddock $
@@ -1400,8 +1408,8 @@ buildInplaceUnpackedPackage verbosity
       | otherwise                   = action
 
     whenRepl action
-      | isNothing (elabReplTarget pkg) = return ()
-      | otherwise                     = action
+      | null (elabReplTarget pkg) = return ()
+      | otherwise                 = action
 
     whenHaddock action
       | hasValidHaddockTargets pkg = action

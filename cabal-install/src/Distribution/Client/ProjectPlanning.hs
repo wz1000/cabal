@@ -1859,7 +1859,7 @@ elaborateInstallPlan verbosity platform compiler compilerprogdb pkgConfigDB
         elabBuildTargets    = []
         elabTestTargets     = []
         elabBenchTargets    = []
-        elabReplTarget      = Nothing
+        elabReplTarget      = []
         elabHaddockTargets  = []
 
         elabBuildHaddocks   =
@@ -2705,7 +2705,7 @@ nubComponentTargets =
 
 pkgHasEphemeralBuildTargets :: ElaboratedConfiguredPackage -> Bool
 pkgHasEphemeralBuildTargets elab =
-    isJust (elabReplTarget elab)
+    (not . null) (elabReplTarget elab)
  || (not . null) (elabTestTargets elab)
  || (not . null) (elabBenchTargets elab)
  || (not . null) (elabHaddockTargets elab)
@@ -2809,13 +2809,11 @@ setRootTargets targetAction perPkgTargetsMap =
         (Just tgts,  TargetActionBuild)   -> elab { elabBuildTargets = tgts }
         (Just tgts,  TargetActionTest)    -> elab { elabTestTargets  = tgts }
         (Just tgts,  TargetActionBench)   -> elab { elabBenchTargets  = tgts }
-        (Just [tgt], TargetActionRepl)    -> elab { elabReplTarget = Just tgt
+        (Just tgts, TargetActionRepl)     -> elab { elabReplTarget = tgts
                                                   , elabBuildHaddocks = False }
         (Just tgts,  TargetActionHaddock) ->
           foldr setElabHaddockTargets (elab { elabHaddockTargets = tgts
                                             , elabBuildHaddocks = True }) tgts
-        (Just _,     TargetActionRepl)    ->
-          error "pruneInstallPlanToTargets: multiple repl targets"
 
     setElabHaddockTargets tgt elab
       | isTestComponentTarget tgt       = elab { elabHaddockTestSuites  = True }
@@ -2855,7 +2853,7 @@ pruneInstallPlanPass1 pkgs =
                    , null (elabBuildTargets elab)
                    , null (elabTestTargets elab)
                    , null (elabBenchTargets elab)
-                   , isNothing (elabReplTarget elab)
+                   , null (elabReplTarget elab)
                    , null (elabHaddockTargets elab)
                    ]
           then Just (installedUnitId elab)
@@ -2953,7 +2951,7 @@ pruneInstallPlanPass1 pkgs =
         | ComponentTarget cname _ <- elabBuildTargets pkg
                                   ++ elabTestTargets pkg
                                   ++ elabBenchTargets pkg
-                                  ++ maybeToList (elabReplTarget pkg)
+                                  ++ elabReplTarget pkg
                                   ++ elabHaddockTargets pkg
         , stanza <- maybeToList $
                     componentOptionalStanza $
@@ -3697,8 +3695,8 @@ setupHsReplFlags _ sharedConfig verbosity builddir =
 
 setupHsReplArgs :: ElaboratedConfiguredPackage -> [String]
 setupHsReplArgs elab =
-    maybe [] (\t -> [showComponentTarget (packageId elab) t]) (elabReplTarget elab)
-    --TODO: should be able to give multiple modules in one component
+    map (\t -> showComponentTarget (packageId elab) t) (elabReplTarget elab)
+    --TODO: should be able to give multiple modules in one component wz1000
 
 
 setupHsCopyFlags :: ElaboratedConfiguredPackage

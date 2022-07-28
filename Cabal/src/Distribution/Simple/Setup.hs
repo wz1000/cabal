@@ -1961,7 +1961,8 @@ instance Semigroup BuildFlags where
 
 data ReplOptions = ReplOptions {
     replOptionsFlags :: [String],
-    replOptionsNoLoad :: Flag Bool
+    replOptionsNoLoad :: Flag Bool,
+    replOptionsFlagOutput :: Flag FilePath
   }
   deriving (Show, Generic, Typeable)
 
@@ -1970,7 +1971,7 @@ instance Structured ReplOptions
 
 
 instance Monoid ReplOptions where
-  mempty = ReplOptions mempty (Flag False)
+  mempty = ReplOptions mempty (Flag False) NoFlag
   mappend = (<>)
 
 instance Semigroup ReplOptions where
@@ -2084,6 +2085,10 @@ replOptions _ =
     "Use the option(s) for the repl"
     replOptionsFlags (\p flags -> flags { replOptionsFlags = p })
     (reqArg "FLAG" (succeedReadE words) id)
+  , option [] ["repl-multi-file"]
+    "Write repl options to this file rather than starting repl"
+    replOptionsFlagOutput (\p flags -> flags { replOptionsFlagOutput = p })
+    (reqArg "FILEPATH" (succeedReadE Flag) flagToList)
   ]
 
 -- ------------------------------------------------------------
