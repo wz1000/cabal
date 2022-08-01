@@ -437,29 +437,8 @@ selectPackageTargets  :: TargetSelector
                       -> [AvailableTarget k] -> Either ReplTargetProblem [k]
 selectPackageTargets targetSelector targets
 
-    -- If there is exactly one buildable library then we select that
-  | [target] <- targetsLibsBuildable
-  = Right [target]
-
-    -- but fail if there are multiple buildable libraries.
-  | not (null targetsLibsBuildable)
-  = Left (matchesMultipleProblem targetSelector targetsLibsBuildable')
-
-    -- If there is exactly one buildable executable then we select that
-  | [target] <- targetsExesBuildable
-  = Right [target]
-
-    -- but fail if there are multiple buildable executables.
-  | not (null targetsExesBuildable)
-  = Left (matchesMultipleProblem targetSelector targetsExesBuildable')
-
-    -- If there is exactly one other target then we select that
-  | [target] <- targetsBuildable
-  = Right [target]
-
-    -- but fail if there are multiple such targets
   | not (null targetsBuildable)
-  = Left (matchesMultipleProblem targetSelector targetsBuildable')
+  = Right targetsBuildable
 
     -- If there are targets but none are buildable then we report those
   | not (null targets)
@@ -470,14 +449,6 @@ selectPackageTargets targetSelector targets
   = Left (TargetProblemNoTargets targetSelector)
   where
     targets'                = forgetTargetsDetail targets
-    (targetsLibsBuildable,
-     targetsLibsBuildable') = selectBuildableTargets'
-                            . filterTargetsKind LibKind
-                            $ targets
-    (targetsExesBuildable,
-     targetsExesBuildable') = selectBuildableTargets'
-                            . filterTargetsKind ExeKind
-                            $ targets
     (targetsBuildable,
      targetsBuildable')     = selectBuildableTargetsWith'
                                 (isRequested targetSelector) targets
